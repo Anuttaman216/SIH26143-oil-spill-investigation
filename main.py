@@ -96,6 +96,7 @@ def main(argv=None):
     p.add_argument("--spill", required=True)
     p = sub.add_parser("investigate")
     p.add_argument("--spill", required=True); p.add_argument("--components")
+    p.add_argument("--ais", choices=["auto", "real", "synthetic"], help="AIS mode (default: config ais.mode)")
     p.add_argument("--particles", type=int); p.add_argument("--members", type=int)
     p = sub.add_parser("compare")
     p.add_argument("--a", required=True); p.add_argument("--b", required=True)
@@ -145,7 +146,8 @@ def main(argv=None):
             return 0 if an.state["status"] != "FAILED" else 1
         if args.cmd == "investigate":
             comps = args.components.split(",") if args.components else None
-            an = P.run_investigation(cfg, args.spill, comps, args.particles, args.members, on_event=_print_event)
+            an = P.run_investigation(cfg, args.spill, comps, args.particles, args.members, on_event=_print_event,
+                                     ais_mode=args.ais)
             _summary(an); _print_candidates(an)
             return 0 if an.state["status"] != "FAILED" else 1
         if args.cmd == "triage":

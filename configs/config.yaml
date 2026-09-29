@@ -40,6 +40,7 @@ sentinel1:
     target_std: 40
 
 environment:
+  mode: auto                # auto: real forcing, else SYNTHETIC Indian-waters climatology (labelled) | real | synthetic
   provider: open_meteo      # open_meteo (live, no key) | netcdf (CMEMS/HYCOM/ERA5 files you downloaded)
   current_files: []
   wind_files: []
@@ -73,7 +74,14 @@ drift:
     particles: 500
 
 ais:
-  provider: dma             # dma (Danish Maritime Authority, live download, no key) | local (your CSV/Parquet files)
+  mode: auto                # auto (real if available, else SYNTHETIC) | real (never synthetic) | synthetic (always)
+  real_provider: auto       # auto | gfw (Global Fishing Watch, Indian waters, needs GFW_API_TOKEN) | dma (Danish waters) | local
+  synthetic:                # used when mode=synthetic, or mode=auto and no real AIS is available (SIH26143 permits this)
+    fallback: true
+    vessels: 10             # total synthetic vessels incl. scenario vessels (capped at 10)
+    scenario: true          # add planted release vessel + nearest-vessel trap + outside-window vessel (roles in synthetic_truth.json)
+    gap_rate_per_day: 2.0   # AIS coverage-gap episodes per vessel per day (x1.5 offshore)
+    seed: 0
   cache_dir: data/ais/cache
   thin_seconds: 60          # DMA reports every few seconds; keep <= 1 fix/min/vessel (no positions invented)
   files: []
@@ -109,13 +117,15 @@ scoring:
     fishing: 0.4
     other: 0.4
     unknown: 0.5
-  max_candidates: 20
+  max_candidates: 10
 
 sar_ship_detection:
   enabled: true
   cfar_guard_px: 4
   cfar_background_px: 12
-  cfar_k: 5.0               # detection if pixel > mean + k*std of background ring
+  cfar_k: 5.0               # 8-bit uploads only: pixel > mean + k*std of background ring
+  point_target_db: 10.0     # Sentinel-1/synthetic scenes: cluster > +10 dB above local sea (unclipped dB anomaly)
+  point_target_min_px: 2
   min_pixels: 3
   max_pixels: 400
   match_distance_km: 1.5

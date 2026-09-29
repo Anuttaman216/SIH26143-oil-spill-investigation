@@ -210,8 +210,15 @@ def stage_triage(an: Analysis, scene, sea, comp_masks: list):
     spill = an.load("spill.json")["spill"]
     gray = scene.rgb_u8[..., 0]
     sd = cfg.sar_ship_detection
-    an.emit("SAR_SHIP_DETECTION", "CA-CFAR bright point targets (untrained baseline) over open sea")
-    det = CFARShipDetector(sd.cfar_guard_px, sd.cfar_background_px, sd.cfar_k, sd.min_pixels, sd.max_pixels)
+    anom_p = Path(scene.path).with_name(Path(scene.path).stem + "_anom.npy")
+    if anom_p.exists():
+        from app.sar_ship_detection.detector import DbPointTargetDetector
+        det = DbPointTargetDetector(np.load(anom_p), float(sd.get("point_target_db", 10.0)),
+                                    int(sd.get("point_target_min_px", 2)), sd.max_pixels)
+        an.emit("SAR_SHIP_DETECTION", f"Point targets > {det.thr:g} dB above sea background (untrained baseline)")
+    else:
+        det = CFARShipDetector(sd.cfar_guard_px, sd.cfar_background_px, sd.cfar_k, sd.min_pixels, sd.max_pixels)
+        an.emit("SAR_SHIP_DETECTION", "CA-CFAR bright point targets on 8-bit image (untrained baseline)")
     dets = det.detect(gray)
     if sea is not None:                                   # ignore coast/land edges
         inner = ndimage.binary_erosion(sea, iterations=int(sd.get("coast_exclusion_px", 8)))
@@ -347,8 +354,10 @@ def stage_drift(an: Analysis, particles: int | None = None, members: int | None 
                 reach = min(reach, max(0.15, 1.3 * pr["p95_ms"]))
                 an.emit("ENVIRONMENTAL_DATA", f"Drift-speed probe: p95 {pr['p95_ms']:.2f} m/s (max {pr['max_ms']:.2f}) "
                                               f"-> forcing domain sized for {reach:.2f} m/s")
-        except ForcingUnavailable:
-            raise
+        except ForcingUnavailable as exc:
+            if cfg.environment.get("mode", "auto") == "real":
+                raise
+            log.warning("drift-speed probe unavailable (%s); synthetic fallback may be used", exc.message)
         except Exception as exc:  # probe is an optimisation only
             log.warning("drift-speed probe failed: %s", exc)
     reach_cap = float(cfg.environment.get("open_meteo", {}).get("reach_speed_ms", 1.0)) * 2
@@ -371,15 +380,33 @@ def _drift_attempt(an, spill, obs, hours, bbox, offsets, window_basis, particles
     from app.drift import source_probability as sp
     from app.environmental.forcing import build_provider
     cfg, d = an.cfg, an.cfg.drift
-    an.emit("ENVIRONMENTAL_DATA", f"Loading forcing provider '{cfg.environment.provider}'")
-    provider = build_provider(cfg, bbox, obs - timedelta(hours=hours), obs + timedelta(hours=d.forward.hours),
-                              progress=lambda msg: an.emit("ENVIRONMENTAL_DATA", msg))
+    fmode = cfg.environment.get("mode", "auto")        # auto: real, else SYNTHETIC fallback | real | synthetic
+    t_from, t_to = obs - timedelta(hours=hours), obs + timedelta(hours=d.forward.hours)
+    provider = None
+    if fmode != "synthetic":
+        an.emit("ENVIRONMENTAL_DATA", f"Loading forcing provider '{cfg.environment.provider}'")
+        try:
+            provider = build_provider(cfg, bbox, t_from, t_to, progress=lambda msg: an.emit("ENVIRONMENTAL_DATA", msg))
+            provider.check_coverage(spill["bbox"], obs - timedelta(hours=hours), obs)
+        except ForcingUnavailable as exc:
+            if fmode == "real":
+                raise
+            an.warn(f"Real environmental forcing unavailable ({exc.message}) — using SYNTHETIC Indian-waters "
+                    "climatology forcing for demonstration.")
+            provider = None
+    if provider is None:
+        from app.environmental.synthetic_forcing import synthetic_provider
+        provider = synthetic_provider(bbox, t_from, t_to, an.repo.dir(an.id) / "forcing")
+        an.warn("Environmental forcing is SYNTHETIC (climatology-inspired analytic currents and wind) — drift "
+                "results illustrate the method only.")
+        an.emit("ENVIRONMENTAL_DATA", f"SYNTHETIC forcing generated: wind from {provider.regime['wind_from_deg']}° "
+                                      f"~{provider.regime['wind_ms']} m/s, current toward "
+                                      f"{provider.regime['current_to_deg']}° ~{provider.regime['current_ms']} m/s")
     coverage_bbox = spill["bbox"]
     provider.check_coverage(coverage_bbox, obs - timedelta(hours=hours), obs)
     forcing = provider.describe()
     at_spill = provider.sample(spill["centroid"]["lat"], spill["centroid"]["lon"], obs)
-    if str(forcing["provenance"]).startswith(Provenance.DEMO_SYNTHETIC.value):
-        an.warn("Environmental forcing is SYNTHETIC DEMO data — drift results illustrate the method only.")
+
     oil = {"oil_type": d.oil_type,
            "oil_model_assumption": d.oil_model_assumption if str(d.oil_type).upper() == "UNKNOWN" else d.oil_type}
 
@@ -495,11 +522,10 @@ def _load_corridor(an: Analysis, summary: dict):
     return Corridor.from_ensemble(ens, fwd, inv, window, regs), spill
 
 
-def stage_ais_and_score(an: Analysis) -> dict:
+def stage_ais_and_score(an: Analysis, ais_mode: str | None = None) -> dict:
     from app.ais import corridor_filter as cf
     from app.ais.gaps import data_quality
-    from app.ais.local_provider import build_ais_provider
-    from app.ais.retrieval import retrieve, search_window
+    from app.ais.retrieval import search_window
     from app.ais.track_processing import clean_and_build
     from app.environmental.forcing import build_provider
     from app.lookalike.analysis import assess
@@ -519,23 +545,51 @@ def stage_ais_and_score(an: Analysis) -> dict:
 
     an.emit("AIS_PROCESSING", "Retrieving historical AIS for source region + release window")
     from app.core.errors import AISDataError
-    provider = build_ais_provider(cfg, progress=lambda msg: an.emit("AIS_PROCESSING", msg))
+    from app.ais.selection import select_ais
     bbox, t0, t1 = search_window(rb, spill["bbox"], obs, max(summary["release_window"]["offsets_hours"]),
                                  a.search_margin_km, a.time_margin_hours)
-    ais_error = None
+    rw = summary["release_window"]
+
+    def corridor_point(t):
+        """Median backtracked-oil position at time t (lat, lon) — used ONLY to place synthetic scenario vessels."""
+        c = cor.cloud_at(t.timestamp())
+        if not len(c):
+            return None
+        lon_, lat_ = cor.inv.transform(float(np.median(c[:, 0])), float(np.median(c[:, 1])))
+        return float(lat_), float(lon_)
     try:
-        raw = retrieve(provider, bbox, t0, t1)
+        syn_scene = an.load("acquisition.json").get("synthetic_scene")
+    except FileNotFoundError:
+        syn_scene = None
+    context = {"spill_centroid": spill["centroid"], "observation_time": obs, "corridor_point": corridor_point,
+               "synthetic_scene": syn_scene,
+               "release_window": (datetime.fromisoformat(rw["start"]), datetime.fromisoformat(rw["end"])),
+               "seed_key": an.id}
+    ais_error, selection = None, None
+    import pandas as pd
+    from app.ais.provider import CANONICAL
+    provider = None
+    try:
+        raw, provider, selection = select_ais(cfg, bbox, t0, t1, context, ais_mode,
+                                              progress=lambda msg: an.emit("AIS_PROCESSING", msg))
     except AISDataError as exc:
         ais_error = exc.to_dict()
         an.warn(f"AIS unavailable: {exc.message}")
-        import pandas as pd
-        from app.ais.provider import CANONICAL
         raw = pd.DataFrame(columns=CANONICAL)
+    synthetic = bool(provider is not None and provider.provenance == Provenance.DEMO_SYNTHETIC.value)
+    if synthetic:
+        an.warn("AIS data are SYNTHETIC (generated for the spill region to demonstrate the algorithm, as permitted "
+                "by SIH26143) — they are NOT real vessels.")
+        if selection and selection.get("fallback_reason"):
+            an.warn(f"Real AIS unavailable ({selection['fallback_reason']}) — using SYNTHETIC AIS.")
+        an.save("ais/synthetic_truth.json", getattr(provider, "truth", {}))
+    # coarse hourly presence (GFW) needs a longer AIS-gap threshold than raw AIS
+    if provider is not None and getattr(provider, "gap_threshold_minutes", None):
+        a = type(a)({**a, "gap_threshold_minutes": max(a.gap_threshold_minutes, provider.gap_threshold_minutes)})
     tracks, cleaning = clean_and_build(raw, a.max_speed_knots)
-    ais_info = {"provider": provider.describe(), "query": {"bbox": bbox, "start": t0.isoformat(), "end": t1.isoformat()},
-                "cleaning": cleaning, "error": ais_error}
-    if provider.provenance == Provenance.DEMO_SYNTHETIC.value:
-        an.warn("AIS data are SYNTHETIC DEMO vessels (fictitious) — candidates illustrate the method only.")
+    ais_info = {"provider": provider.describe() if provider else {"provider": "none", "provenance": "UNAVAILABLE"},
+                "query": {"bbox": bbox, "start": t0.isoformat(), "end": t1.isoformat()},
+                "cleaning": cleaning, "error": ais_error, "selection": selection, "synthetic": synthetic}
     an.emit("AIS_PROCESSING", f"{cleaning['vessels']} vessel track(s) after cleaning "
                               f"(dropped: {cleaning['duplicates']} duplicates, {cleaning['invalid_coordinates']} invalid "
                               f"coords, {cleaning['impossible_speed']} impossible speeds)")
@@ -573,7 +627,8 @@ def stage_ais_and_score(an: Analysis) -> dict:
     # ---- candidate scoring ------------------------------------------------------------------------
     an.emit("CANDIDATE_SCORING", "Computing evidence features and Evidence Correlation Score")
     weights = dict(cfg.scoring.weights)
-    ctx = {"ais_provenance": provider.provenance, "corridor_buffer_km": a.corridor_buffer_km,
+    ctx = {"ais_provenance": provider.provenance if provider else "UNAVAILABLE", "synthetic_ais": synthetic,
+           "corridor_buffer_km": a.corridor_buffer_km,
            "high_region_area_km2": summary["source_regions"]["high"]["area_km2"],
            "n_members": summary["n_members"], "n_particles": summary["particles_per_member"],
            "release_window": summary["release_window"], "forcing_provenance": summary["forcing"]["provenance"],
@@ -612,6 +667,7 @@ def stage_ais_and_score(an: Analysis) -> dict:
         f["n_positions"], f["median_report_interval_s"] = dq["n_positions"], dq["median_report_interval_s"]
         fs = feature_scores(f, cfg)
         cands.append({"vessel": {"mmsi": mmsi, "imo": t.imo, "name": t.name, "type": t.vessel_type},
+                      "synthetic": synthetic,
                       "score": total_score(fs, weights), "feature_scores": fs, "features": f, "data_quality": dq})
     cands.sort(key=lambda c: c["score"], reverse=True)
     cands = cands[: cfg.scoring.max_candidates]
@@ -628,7 +684,7 @@ def stage_ais_and_score(an: Analysis) -> dict:
     rank_of = {c["vessel"]["mmsi"]: c["rank"] for c in cands}
     # display tracks: ~20 m tolerance for candidates, ~80 m for context traffic (analysis used full tracks)
     track_feats = [track_feature(t, 0.0002 if t.mmsi in rank_of else 0.0008, is_candidate=t.mmsi in rank_of,
-                                 rank=rank_of.get(t.mmsi)) for t in tracks]
+                                 rank=rank_of.get(t.mmsi), synthetic=synthetic) for t in tracks]
 
     separation = None
     if len(cands) >= 2:
@@ -641,6 +697,8 @@ def stage_ais_and_score(an: Analysis) -> dict:
                                "correlation, not proof.")}
     if ais_error:
         message = f"Drift analysis completed, but AIS is unavailable: {ais_error['message']}"
+    elif synthetic and cands:
+        message = f"{len(cands)} SYNTHETIC candidate vessel(s) — demonstration only, not real vessels"
     elif not tracks:
         message = "Drift analysis completed, but no AIS tracks were available for the requested region/time."
     elif not cands:
@@ -687,8 +745,32 @@ def _guard(an: Analysis, fn):
         log.exception("analysis %s failed", an.id)
 
 
-def stage_acquire(an: Analysis, scene_id: str, aoi: list[float], resolution_m: float) -> str:
-    from app.sar.sentinel1 import ingest_scene
+def stage_acquire(an: Analysis, scene_id: str, aoi: list[float], resolution_m: float,
+                  synthetic_time: datetime | None = None) -> str:
+    from app.sar.sentinel1 import clip_aoi_to_scene, ingest_scene
+    if scene_id == "SYNTHETIC":
+        from app.sar.synthetic_scene import generate_scene
+        t = synthetic_time or (datetime.now(timezone.utc) - timedelta(days=2)).replace(hour=0, minute=31, second=0,
+                                                                                         microsecond=0)
+        an.emit("SCENE_ACQUISITION", "No usable real Sentinel-1 scene selected: generating a SYNTHETIC SAR scene for "
+                                     f"AOI {[round(v, 3) for v in aoi]} (demonstration data, not an observation)")
+        an.warn("SAR scene is SYNTHETIC (generated for demonstration) — it is not a satellite observation.")
+        info = generate_scene(aoi, t, an.repo.dir(an.id) / "scene", max(resolution_m, 20.0),
+                              seed=int(__import__("hashlib").sha256(an.id.encode()).hexdigest()[:8], 16),
+                              norm=dict(an.cfg.sentinel1.get("normalization", {})),
+                              progress=lambda msg: an.emit("SCENE_ACQUISITION", msg))
+        an.state["scene_request"] = {"scene_id": "SYNTHETIC", "aoi": aoi, "resolution_m": info["resolution_m"]}
+        an.save("acquisition.json", info)
+        an.emit("SCENE_ACQUISITION", f"SYNTHETIC scene ready: {info['size'][0]}x{info['size'][1]} px, "
+                                     f"sea {100 * info['sea_fraction']:.0f}%")
+        return info["path"]
+    clipped, cover = clip_aoi_to_scene(scene_id, aoi)
+    if clipped != aoi:
+        an.warn(f"The selected real Sentinel-1 scene covers only {100 * cover:.0f}% of the drawn area; the analysis "
+                "is limited to the covered part.")
+        an.emit("SCENE_ACQUISITION", f"Scene covers {100 * cover:.0f}% of the AOI: area clipped to "
+                                     f"{[round(v, 3) for v in clipped]}")
+        aoi = clipped
     an.emit("SCENE_ACQUISITION", f"Sentinel-1 {scene_id}: AOI {[round(v, 3) for v in aoi]} at {resolution_m:g} m")
     info = ingest_scene(scene_id, aoi, an.repo.dir(an.id) / "scene", resolution_m,
                         progress=lambda msg: an.emit("SCENE_ACQUISITION", msg),
@@ -702,13 +784,13 @@ def stage_acquire(an: Analysis, scene_id: str, aoi: list[float], resolution_m: f
 def run_detection(cfg: Config, input_path: str | None = None, geo_override: dict | None = None,
                   analysis_id: str | None = None, on_event: ProgressFn | None = None, threshold: float | None = None,
                   scene_id: str | None = None, aoi: list[float] | None = None, resolution_m: float = 10.0,
-                  repo=None) -> Analysis:
+                  repo=None, synthetic_time: datetime | None = None) -> Analysis:
     """Phase 1: (acquire Sentinel-1) -> segment -> polygons -> SAR targets -> triage -> AWAITING_SLICK_SELECTION."""
     an = Analysis(cfg, analysis_id, on_event, repo)
     an.emit("QUEUED", "Detection queued")
 
     def go():
-        path = stage_acquire(an, scene_id, aoi, resolution_m) if scene_id else input_path
+        path = stage_acquire(an, scene_id, aoi, resolution_m, synthetic_time) if scene_id else input_path
         seg = stage_segment(an, path, geo_override, threshold)
         if not seg.get("spill") or an.state.get("outcome") != "AWAITING_SLICK_SELECTION":
             stage_report(an)
@@ -719,7 +801,7 @@ def run_detection(cfg: Config, input_path: str | None = None, geo_override: dict
 
 def run_investigation(cfg: Config, analysis_id: str, component_ids: list[str] | None = None,
                       particles: int | None = None, members: int | None = None, on_event: ProgressFn | None = None,
-                      repo=None) -> Analysis:
+                      repo=None, ais_mode: str | None = None) -> Analysis:
     """Phase 2: selected slick(s) -> forcing -> backward/forward drift -> AIS -> scoring -> report."""
     an = Analysis(cfg, analysis_id, on_event, repo)
     an.state.pop("error", None)
@@ -736,7 +818,7 @@ def run_investigation(cfg: Config, analysis_id: str, component_ids: list[str] | 
             stage_report(an)
             an.emit("REPORT", exc.message, status="PARTIAL")
             return
-        stage_ais_and_score(an)
+        stage_ais_and_score(an, ais_mode)
         an.state["outcome"] = "COMPLETED"
         stage_report(an)
         an.emit("COMPLETED", "Investigation complete", status="COMPLETED")
@@ -747,10 +829,11 @@ def run_investigation(cfg: Config, analysis_id: str, component_ids: list[str] | 
 def run_full(cfg: Config, input_path: str | None = None, geo_override: dict | None = None,
              analysis_id: str | None = None, on_event: ProgressFn | None = None, threshold: float | None = None,
              particles: int | None = None, members: int | None = None, repo=None, component_ids=None,
-             scene_id: str | None = None, aoi: list[float] | None = None, resolution_m: float = 20.0) -> Analysis:
+             scene_id: str | None = None, aoi: list[float] | None = None, resolution_m: float = 20.0,
+             ais_mode: str | None = None) -> Analysis:
     """Both phases (CLI convenience). Without component_ids the top triage-ranked slick is investigated."""
     an = run_detection(cfg, input_path, geo_override, analysis_id, on_event, threshold, scene_id, aoi,
                        resolution_m, repo)
     if an.state.get("status") != "AWAITING_SLICK_SELECTION":
         return an
-    return run_investigation(cfg, an.id, component_ids, particles, members, on_event, repo)
+    return run_investigation(cfg, an.id, component_ids, particles, members, on_event, repo, ais_mode)

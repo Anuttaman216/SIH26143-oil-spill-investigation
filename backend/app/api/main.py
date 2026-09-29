@@ -108,7 +108,8 @@ ARTIFACTS = {"scene.jpg", "scene.png", "mask.png", "probability.png", "report.ht
 
 
 class SceneAnalysisRequest(BaseModel):
-    scene_id: str
+    scene_id: str = Field(..., description='Sentinel-1 item id, or "SYNTHETIC" for a labelled synthetic demo scene')
+    synthetic_time: Optional[str] = Field(None, description="ISO time for a SYNTHETIC scene (default: 2 days ago 00:31 UTC)")
     aoi: list[float] = Field(..., min_length=4, max_length=4, description="[west, south, east, north]")
     resolution_m: float = Field(20.0, ge=10, le=100)
     threshold: Optional[float] = Field(None, gt=0, lt=1)
@@ -116,6 +117,8 @@ class SceneAnalysisRequest(BaseModel):
 
 class InvestigateRequest(BaseModel):
     component_ids: list[str] = []
+    ais_mode: Optional[str] = Field(None, pattern="^(auto|real|synthetic)$",
+                                    description="auto: real AIS if available else SYNTHETIC; real; synthetic")
     particles: Optional[int] = Field(None, ge=10, le=20000)
     members: Optional[int] = Field(None, ge=1, le=50)
 
@@ -145,7 +148,8 @@ def health():
     import torch
     return {"status": "ok", "mode": cfg.get("mode"), "cuda": torch.cuda.is_available(),
             "model_present": cfg.path(cfg.segmentation.model_path).exists(), "storage": cfg.storage.backend,
-            "forcing_provider": cfg.environment.provider, "ais_provider": cfg.ais.provider}
+            "forcing_provider": cfg.environment.provider, "ais_mode": cfg.ais.get("mode", "auto"),
+            "ais_real_provider": cfg.ais.get("real_provider", "auto")}
 
 
 @app.get("/api/v1/config")
@@ -154,8 +158,8 @@ def public_config():
             "sentinel1": dict(cfg.sentinel1),
             "drift": {k: cfg.drift[k] for k in ("particles", "ensemble_runs", "release_offsets_hours", "oil_type",
                                                 "oil_model_assumption", "timestep_seconds")},
-            "ais": {k: cfg.ais[k] for k in ("provider", "corridor_buffer_km", "max_source_distance_km",
-                                            "gap_threshold_minutes")},
+            "ais": {k: cfg.ais.get(k) for k in ("mode", "real_provider", "corridor_buffer_km",
+                                                "max_source_distance_km", "gap_threshold_minutes")},
             "scoring": {"weights": dict(cfg.scoring.weights)}, "stages": P.STAGES}
 
 
@@ -187,8 +191,12 @@ def create_scene_analysis(req: SceneAnalysisRequest):
         raise HTTPException(400, f"AOI too large (max {cfg.sentinel1.get('max_aoi_deg', 1.5)}° per side)")
     an = P.Analysis(cfg)
     an.emit("QUEUED", f"Queued: Sentinel-1 {req.scene_id}")
+    from datetime import datetime as _dt
+    syn_t = _dt.fromisoformat(req.synthetic_time.replace("Z", "+00:00")) if req.synthetic_time else None
+    an.emit("QUEUED", "SYNTHETIC SAR scene requested (demonstration)" if req.scene_id == "SYNTHETIC"
+            else f"Real Sentinel-1 scene {req.scene_id}")
     _submit(an.id, P.run_detection, cfg, None, None, an.id, None, req.threshold, req.scene_id, req.aoi,
-            req.resolution_m)
+            req.resolution_m, None, syn_t)
     return AnalysisCreated(analysis_id=an.id, status="QUEUED")
 
 
@@ -232,7 +240,8 @@ def investigate(aid: str, req: InvestigateRequest):
     ahead = len(_queue)
     an.emit("ENVIRONMENTAL_DATA", f"Investigation queued for {len(req.component_ids) or 'top-ranked'} slick(s)"
             + (f" — waiting for {ahead} other analysis job(s) to finish" if ahead else ""))
-    _submit(aid, P.run_investigation, cfg, aid, req.component_ids or None, req.particles, req.members)
+    _submit(aid, P.run_investigation, cfg, aid, req.component_ids or None, req.particles, req.members, None, None,
+            req.ais_mode)
     return AnalysisCreated(analysis_id=aid, status="QUEUED")
 
 

@@ -11,10 +11,13 @@ never "vessel X caused the spill". Scores are an uncalibrated **Evidence Correla
 ## Current state (what works)
 - Runs on **real, key-free data**: Sentinel-1 GRD (Microsoft Planetary Computer STAC), Open-Meteo marine
   currents + ERA5/forecast wind, Danish Maritime Authority (DMA) historical AIS, GSHHG coastline.
-- Demo region is **Danish waters** (the only free historical AIS used). Indian waters: SAR + forcing work, but no free
-  historical AIS exists — an `AISProvider` for an institutional/commercial feed is needed.
+- **Target region: Indian waters.** AIS source per investigation (`ais.mode`): `auto` = real AIS if available
+  (Global Fishing Watch hourly presence with `GFW_API_TOKEN`; DMA for Danish scenes; local files), otherwise
+  **SYNTHETIC AIS** generated around the spill region; `real` = never synthetic; `synthetic` = always. SIH26143 permits
+  synthetic AIS: "Real AIS if available may be used else synthetic data can be prepared for the region of oil spill to
+  demonstrate the functioning of the algorithm." Synthetic data is labelled SYNTHETIC everywhere (see README §4b).
 - End-to-end verified via API/UI on real scenes: fresh area ≈ 10 min (mostly one-time AIS day downloads,
-  ~0.5–0.7 GB each); repeat investigation in a cached area ≈ 1–1.5 min. 33 tests pass (offline fixtures).
+  ~0.5–0.7 GB each); repeat investigation in a cached area ≈ 1–1.5 min. 47 tests pass (offline fixtures).
 
 ## Architecture (modular monolith)
 ```
@@ -33,7 +36,9 @@ backend/app/services/pipeline.py  the ONLY orchestrator (CLI main.py uses the sa
    │                             fail-fast on hourly quota), cached OpenDrift readers
    ├─ drift/ (opendrift_runner, backtrack, source_probability)  OpenOil; ALL ensemble members in ONE run;
    │                             backward (weathering off) + forward 24 h; KDE + 50/80/95 % HDR source regions
-   ├─ ais/ (dma_provider, local_provider, track_processing, corridor_filter, gaps, retrieval)
+   ├─ ais/ selection.py (real-vs-synthetic choice) · gfw_provider.py (GFW 4Wings, Indian waters) ·
+   │       synthetic_provider.py (Indian-waters presets, MMSI 419…, SYN- names, scenario roles) · dma_provider.py ·
+   │       local_provider.py · track_processing, corridor_filter, gaps, retrieval
    │                             DMA daily zip -> Parquet cache; Arrow-side filtering/thinning; vectorised cleaning;
    │                             spatio-temporal corridor matching vs time-resolved particle cloud (vectorised)
    ├─ scoring/ (features, scorer, evidence_report)   feature scores, weighted score, epistemically-labelled statements
@@ -76,6 +81,37 @@ cd frontend; npm install; npm run build; cd ..
 UI flow: draw AOI → search scenes → Acquire & detect → tick slick(s) in Triage → Investigate → Candidates → Evidence → Report.
 CLI: `python main.py scenes|detect|triage|investigate|report|run|list` (see README §11).
 
+## Real-first, SYNTHETIC-fallback at every step (Indian waters)
+- Scene: real Sentinel-1 (partial scenes clipped to coverage) or **SYNTHETIC SAR scene** (`sar/synthetic_scene.py`,
+  UI button / API `scene_id: "SYNTHETIC"`), labelled SYNTHETIC_DEMO; its discharging ship is planted in synthetic AIS.
+- Forcing: Open-Meteo, else SYNTHETIC monsoon-climatology field (`environmental/synthetic_forcing.py`,
+  `environment.mode: auto|real|synthetic`).
+- Ship detection: dB-anomaly point targets (> +10 dB) when `_anom.npy` exists, else 8-bit CFAR (uploads).
+- Default map/AOI now off Mumbai; UI shows real-scene coverage and offers the synthetic scene when coverage < 50 %.
+
+## Candidate / traffic limits and UI
+- At most 10 candidate vessels are ranked for real or synthetic AIS (`scoring.max_candidates: 10`).
+- Synthetic AIS: at most 10 vessels (<= 2 fishing); lane ships use straight legs + smooth course alterations,
+  trawlers use tow/haul/turn patterns (no random-walk zig-zags, no ruler-straight lines).
+- Frontend: landing page at `/` (project brief, need, pipeline, real-vs-synthetic data, live endpoint list) and
+  the investigation console at `/#/console` (`?step=search|triage|investigation|candidates|evidence`);
+  NEXUS-style dark theme (particle backdrop, glass cards, step rail, UTC clock, LIVE pill).
+  Landing motion: animated India ops map (GSHHG coastline, lanes, ships, ports, S-1 swath, slick + hindcast), word-by-word
+  headline, typewriter, scroll reveals, count-ups, scroll-linked pipeline bar and ship on waves (components/motion.tsx,
+  OceanMap.tsx, Waves.tsx; honours prefers-reduced-motion). Console: step header, collapsible notices/callouts,
+  candidate cards, score ring, stage stepper, investigation HUD, collapsible legend.
+
+## AIS modes (real vs synthetic)
+- Selection: `backend/app/ais/selection.py`; config `ais.mode`, `ais.real_provider`, `ais.synthetic.*`; per-run override
+  via dashboard dropdown, API `ais_mode`, CLI `--ais`.
+- Synthetic generator: deterministic per analysis id; lanes by region preset, per-type speeds, fishing loiter walks,
+  60–360 s reporting, Poisson AIS gaps (15–90 min), noise + duplicates/invalid/spike defects; optional scenario
+  (planted release tanker on the backtracked path, nearest-vessel trap, outside-window vessel) with roles in
+  `ais/synthetic_truth.json` (never read by scoring). On the Mumbai test scene the planted tanker ranked 3rd of 15 and
+  both decoys were filtered — busy synthetic lanes also cross the corridor, as in reality.
+- Labelling: provenance SYNTHETIC_DEMO, `synthetic: true` on candidates/tracks, `[SYNTHETIC AIS]` evidence prefix,
+  report assumption quoting SIH26143, dashboard banner + badges.
+
 ## Known limitations / open issues
 - Model trained only 3 epochs on SOS, no look-alike negatives; still needs analyst triage; fine-tuning on real
   Sentinel-1 (with look-alike negatives) is the top next step (retraining only if the owner asks).
@@ -84,5 +120,7 @@ CLI: `python main.py scenes|detect|triage|investigate|report|run|list` (see READ
   a clear message). CMEMS/ERA5 NetCDF (`environment.provider: netcdf`) is the alternative.
 - First-time AIS per new day is network-bound (~0.5–0.7 GB DMA zip + ~30 s indexing); cached afterwards.
 - Single analysis worker (one job at a time). Docker/PostGIS path written but never run (no Docker here).
-- Optional keyed sources (CMEMS, CDSE, GFW, Indian AIS) listed in `/api/v1/sources` but not integrated.
+- GFW provider is implemented and mock-tested but not yet run against the live API (needs the owner's token);
+  GFW is hourly presence, not raw AIS. Synthetic MMSIs use MID 419 and could coincide with real numbers (names are SYN-).
+- Optional keyed sources (CMEMS, CDSE, Indian institutional AIS) listed in `/api/v1/sources` but not integrated.
 - Windows gotchas: pandas 3 datetimes not ns (use `to_epoch_s`); MapLibre forces `position:relative` on its container.

@@ -60,10 +60,89 @@ State machine: `QUEUED → SCENE_ACQUISITION → SCENE_INSPECTION → GEOREFEREN
 | 10 m wind | Open-Meteo (ERA5 archive / forecast) | **none** | drift + triage | global 0.25° |
 | Historical AIS | Danish Maritime Authority (aisdata.ais.dk) | **none** | vessel tracks | Danish waters, daily files 2024-03 → present |
 | Coastline | GSHHG full resolution (roaring-landmask) | none (bundled) | land mask, stranding | global |
-| *Optional upgrades* | CMEMS, Copernicus Data Space, Global Fishing Watch, Indian AIS | **you enter them** in `.env` | not required | — |
+| Real AIS, Indian waters | Global Fishing Watch 4Wings presence | free non-commercial token (`GFW_API_TOKEN`) | vessel tracks (hourly) | global incl. Indian EEZ |
+| **Synthetic AIS** (fallback) | built-in generator, Indian-waters presets | **none** | vessel tracks when no real AIS (labelled SYNTHETIC) | any region |
+| *Optional upgrades* | CMEMS, Copernicus Data Space, Indian institutional AIS | **you enter them** in `.env` | not required | — |
 
 - Keys are never created or entered by the software. To use an optional source, register with the provider, copy `.env.example` to `.env`, fill the variable, restart the backend. Values are never returned by the API.
-- **Indian waters:** Sentinel-1 and forcing work everywhere, but there is **no free historical AIS** for Indian waters. The app will report *"No AIS coverage for this region"* there until an `AISProvider` for an institutional (INCOIS / DG Shipping NAIS / Coast Guard) or commercial feed is added (`backend/app/ais/provider.py`). That is why the working demonstration uses Danish waters.
+- **Indian waters:** Sentinel-1 and forcing work everywhere. For AIS the app uses Global Fishing Watch if `GFW_API_TOKEN` is set, otherwise it generates clearly labelled **SYNTHETIC AIS** for the spill region (see §4b). Danish scenes still use real DMA AIS automatically.
+
+## 4b. AIS for Indian waters: real provider + SYNTHETIC fallback
+
+All AIS sources implement the same `AISProvider` interface (`backend/app/ais/provider.py`) and return the same
+columns, so **real and synthetic AIS feed the identical downstream pipeline**:
+AIS → cleaning/filtering → spatio-temporal corridor → candidate vessels → evidence scoring → investigation report.
+The choice is made in `backend/app/ais/selection.py`.
+
+**Real AIS options for Indian waters**
+| Option | Data | Access | Status in this project |
+|---|---|---|---|
+| **Global Fishing Watch 4Wings** (`public-global-presence:latest`) | AIS-derived presence of **all vessel types**: 1 position per vessel per hour, 0.01° (~1 km) cells, name/MMSI/type | Free **non-commercial** token → `GFW_API_TOKEN` in `.env` | Implemented (`ais/gfw_provider.py`); request/parse tested with a mocked response; not yet run against the live API (needs your token) |
+| DG Shipping NAIS / INCOIS / Indian Navy IFC-IOR | Raw national AIS | Institutional agreement | Not available — add an `AISProvider` when access exists |
+| Commercial (Spire/Kpler, MarineTraffic, exactEarth) | Raw terrestrial + satellite AIS | Paid | Not integrated |
+| Danish Maritime Authority | Raw AIS, Danish waters only | Free | Implemented (`ais/dma_provider.py`), used automatically for Danish scenes |
+
+GFW caveats: it is not raw AIS (speed/course are derived from hourly positions; AIS-gap detection uses a ≥ 3 h
+threshold for this source), coverage near busy coasts depends on terrestrial/satellite reception, and the licence
+requires attribution and non-commercial use.
+
+**Why synthetic AIS is allowed.** The official SIH26143 statement says: *"Real AIS if available may be used else
+synthetic data can be prepared for the region of oil spill to demonstrate the functioning of the algorithm."*
+Free historical raw AIS for Indian waters does not exist, so the project generates labelled synthetic AIS when
+real AIS is unavailable — it never depends on real Indian AIS being present.
+
+**How synthetic AIS is generated** (`backend/app/ais/synthetic_provider.py`, deterministic per analysis id):
+1. *Region preset* from the search area: Arabian Sea / west coast (lanes ≈160°, 175°, 95°; tankers, container,
+   offshore supply near Mumbai High, heavy fishing), Bay of Bengal / east coast (≈20°, 35°, 100°), Sri Lanka
+   east–west route (≈90°, 80°, 120°), or a generic Indian Ocean preset.
+2. *Lane traffic*: lanes at the preset bearings offset across the area; straight legs joined by smooth course
+   alterations (8–25°, spread over 15–35 min, alternating so ships keep to their lane) plus a ±1–2.5° meander;
+   per-type speeds (tanker 11–14 kn, container 14–20, bulk 10–13, cargo 10–15, offshore supply 8–12, tug 6–10,
+   passenger 14–18) with AR(1) variation.
+3. *Fishing vessels* (at most 2): one 12–30 h session of trawl tows (1.5–5 h at 2.5–4.5 kn), hauling at 0.5–1.5 kn,
+   slow ~180° turns (≤ 2.5°/min) onto the next tow, kept on a fishing ground.
+   **At most 10 synthetic vessels in total** (scenario + background; `ais.synthetic.vessels`, capped in code).
+4. *Reporting*: every 60–180 s (large ships) / 180–360 s (fishing, class-B-like); AIS gaps as Poisson episodes of
+   15–90 min (1.5× more frequent offshore); 10 m position jitter, 0.3 kn SOG and 2° COG noise; a few duplicate
+   reports, invalid coordinates and ~85 km position spikes so the real cleaning code is exercised.
+5. *Identity*: 9-digit MMSIs with India's MID **419** (band 419900000–419999999), names prefixed **`SYN-`**, no IMO.
+   A synthetic MMSI could coincide with a real Indian vessel's number — which is why the `SYN-` name and the
+   SYNTHETIC label are mandatory and shown everywhere.
+6. *Scenario* (`ais.synthetic.scenario: true`): a planted release tanker placed on the model's backtracked oil path at
+   a random time in the release window (slowdown to 4 kn, AIS gap 1–3 h later), a container ship crossing the observed
+   slick at image time (nearest-vessel trap), and a cargo ship crossing the source area before the window. Roles are
+   saved to `outputs/analyses/<ID>/ais/synthetic_truth.json` and are never read by the scoring. Because the planted
+   vessel uses the model's own backtracked path, this demonstrates the matching/scoring logic, not real-world skill.
+
+**Labelling.** Provenance `SYNTHETIC_DEMO`; warnings in the analysis and report; the report's first assumption quotes
+the SIH permission; every AIS evidence statement is prefixed `[SYNTHETIC AIS]`; candidates and tracks carry
+`synthetic: true`; the dashboard shows a "SYNTHETIC AIS — not real vessels" banner and a per-row SYNTHETIC badge.
+
+**Switching modes** (`configs/config.yaml → ais`):
+```yaml
+ais:
+  mode: auto            # auto: real if available, else SYNTHETIC | real: never synthetic | synthetic: always
+  real_provider: auto   # auto (DMA in Danish waters, else GFW if GFW_API_TOKEN set, else local files) | gfw | dma | local
+  synthetic: {fallback: true, vessels: 10, scenario: true, gap_rate_per_day: 2.0, seed: 0}   # max 10
+```
+Per investigation: the **AIS source** dropdown next to *Investigate* in the dashboard, `ais_mode` in
+`POST /api/v1/analyses/{id}/investigate`, or `python main.py investigate --spill <ID> --ais auto|real|synthetic`.
+For real Indian AIS: put `GFW_API_TOKEN=...` in `.env`, restart the backend, use mode `auto` or `real`.
+
+## 4c. Real data first, labelled SYNTHETIC fallback at every step (Indian waters)
+
+| Step | Real source | When it is missing | Synthetic fallback (always labelled SYNTHETIC) |
+|---|---|---|---|
+| Area & scene | Sentinel-1 GRD (Planetary Computer) — footprints shown; a partially covering scene is **clipped** to the covered part | Sentinel-1 revisits Indian waters rarely; many boxes are covered only partly or not at all | **Use SYNTHETIC SAR scene** button: `backend/app/sar/synthetic_scene.py` — gamma speckle (ENL 4.4) × streaked wind texture (±1 dB) × incidence ramp; one ship (+20 dB point target with sidelobes) at the head of a 7–14 km discharge trail (6–8 dB damping, 80→450 m wide, meandering); a compact low-wind look-alike (−3.5 dB); 4–8 other ships; then the SAME normalisation as real scenes. Scenario saved in `acquisition.json`. |
+| Detection & triage | model + triage on the scene | — | runs unchanged; on synthetic scenes the trail is found (OIL_LIKELY, ship-trail) and look-alikes are rejected |
+| Hindcast | Open-Meteo currents + ERA5/forecast wind | offline / free-tier hourly limit | `backend/app/environmental/synthetic_forcing.py`: Indian-waters monsoon climatology (SW monsoon Jun–Sep from ~240° 9 m/s, NE monsoon Dec–Feb from ~40° 6 m/s; WICC/EICC/monsoon currents by season, M2 tide). `environment.mode: auto|real|synthetic` |
+| Candidates / evidence | GFW (token) · DMA (Danish) · local files | no real AIS | synthetic AIS (§4b); with a synthetic scene, its discharging ship gets a matching AIS track, so SAR/AIS evidence is consistent |
+
+Ship detection on Sentinel-1/synthetic scenes now uses the **unclipped dB anomaly** (clusters > +10 dB above the
+local sea; `sar_ship_detection.point_target_db`) — the 8-bit CFAR could not fire after normalisation (threshold above 255).
+Downloads retry 3× with fewer connections. Example (synthetic scene off Mumbai, real Open-Meteo forcing, synthetic AIS):
+phase 1 ≈ 20 s, phase 2 ≈ 25 s; trail OIL_LIKELY with ship-trail pattern, window starts at T, #1 candidate is the
+discharging vessel (SAR-attached).
 
 ## 5. Prerequisites & versions
 Windows 10/11, Linux or macOS · **Python 3.14.3** (3.12+ fine) · **Node 24.14** (20+) · ~10 GB free disk (AIS cache ≈ 0.25 GB per day) · internet access · NVIDIA GPU optional (verified on RTX 5050, CUDA 13).
@@ -112,7 +191,7 @@ Step 4 was **calibrated** (`scripts/calibrate_radiometry.py`) on a clean real sc
 ```powershell
 .\.venv\Scripts\python -m uvicorn app.api.main:app --app-dir backend --port 8000
 ```
-Open **http://localhost:8000** (API docs: http://localhost:8000/docs). Optional hot-reload UI: `cd frontend; npm run dev` → http://localhost:5173.
+Open **http://localhost:8000** — a landing page (project brief, why it is needed, pipeline, data, live endpoint list) with *Launch console* → **http://localhost:8000/#/console** (API docs: http://localhost:8000/docs). Optional hot-reload UI: `cd frontend; npm run dev` → http://localhost:5173.
 
 **Investigator workflow in the UI**
 1. **Area & scene** — *Draw on map* (drag a box over water, ≤ 1° per side), choose dates, *Search scenes*, pick a Sentinel-1 pass (footprints shown on the map), *Acquire & detect* (10 m native recommended; ~2–6 min download for a 0.6°×0.4° AOI).
@@ -126,7 +205,7 @@ Open **http://localhost:8000** (API docs: http://localhost:8000/docs). Optional 
 .\.venv\Scripts\python main.py scenes --bbox 10.3,57.6,10.9,58.0 --start 2026-09-01 --end 2026-09-24
 .\.venv\Scripts\python main.py detect --scene <ITEM_ID> --aoi 10.3,57.6,10.9,58.0 [--res 10]
 .\.venv\Scripts\python main.py triage --spill <ID>
-.\.venv\Scripts\python main.py investigate --spill <ID> --components <ID>_C12[,<ID>_C40]
+.\.venv\Scripts\python main.py investigate --spill <ID> --components <ID>_C12[,<ID>_C40] [--ais auto|real|synthetic]
 .\.venv\Scripts\python main.py report --spill <ID>
 .\.venv\Scripts\python main.py run --input my_scene.tif          # local GeoTIFF, both phases (top triage slick)
 .\.venv\Scripts\python main.py list
@@ -138,7 +217,7 @@ Open **http://localhost:8000** (API docs: http://localhost:8000/docs). Optional 
 
 ## 13. Tests
 ```powershell
-.\.venv\Scripts\python -m pytest -q tests        # 33 tests, ~1.5 min, offline
+.\.venv\Scripts\python -m pytest -q tests        # 47 tests, ~1.5 min, offline
 ```
 The tests use deterministic synthetic fixtures (`tests/fixtures/`, a labelled twin experiment with a planted vessel). **The application never reads them**; they exist so the science can be verified offline and reproducibly.
 

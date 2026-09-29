@@ -25,7 +25,8 @@ def cfg(tmp_path_factory):
         "storage": {"output_dir": str(out), "backend": "file"},
         "environment": {"provider": "netcdf", "current_files": [str(FIX / "forcing" / "demo_currents.nc")],
                         "wind_files": [str(FIX / "forcing" / "demo_wind.nc")]},
-        "ais": {"provider": "local", "files": [str(FIX / "ais" / "demo_ais.csv")], "column_map": "default"},
+        "ais": {"mode": "real", "real_provider": "local", "files": [str(FIX / "ais" / "demo_ais.csv")],
+                "column_map": "default"},
         "lookalike": {"fetch_wind": False},
         "drift": {"particles": 60, "ensemble_runs": 2, "forward": {"particles": 40}},
     })

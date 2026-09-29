@@ -20,7 +20,12 @@ def build_candidate_evidence(c: dict, ctx: dict) -> dict:
     tm, b, cont = f["temporal"], f["behavior"], f["continuity"]
     stmts, sup, con, miss = [], [], [], []
 
+    syn = bool(ctx.get("synthetic_ais"))
+
     def add(kind, section, text):
+        if syn and section in ("AIS", "Spatial", "Trajectory", "Temporal", "Vessel type", "Behaviour",
+                               "AIS continuity", "SAR/AIS at acquisition", "Assessment"):
+            text = "[SYNTHETIC AIS] " + text
         stmts.append({"kind": kind.value, "section": section, "text": text})
 
     add(K.OBSERVED, "AIS", f"AIS reports {c['vessel']['name'] or 'an unnamed vessel'} (MMSI {c['vessel']['mmsi']}) "
@@ -106,11 +111,14 @@ def build_candidate_evidence(c: dict, ctx: dict) -> dict:
         f"Georeferencing provenance: {ctx['georef_provenance']}.",
         "SAR/AIS matching uncertainty: " + ctx.get("sar_ais_note", "not evaluated"),
     ]
+    if syn:
+        miss.insert(0, "Real AIS for this region/time (the vessel tracks used here are SYNTHETIC)")
     rank_word = "the strongest" if c["rank"] == 1 else f"rank-{c['rank']}"
     summary = (f"Candidate: {c['vessel']['name'] or c['vessel']['mmsi']} — Evidence Correlation Score "
                f"{c['score']:.1f} / 100 ({rank_word} evidence correlation among {ctx['n_candidates']} retrieved "
                f"candidates). Assessment: the vessel is a candidate requiring further investigation. "
-               f"The evidence does not establish that the vessel caused the spill.")
+               f"The evidence does not establish that the vessel caused the spill."
+               + (" This vessel is SYNTHETIC (generated for demonstration) and does not exist." if syn else ""))
     add(K.INFERENCE, "Assessment", summary)
     return {"summary": summary, "statements": stmts, "supporting_evidence": sup,
             "contradicting_evidence": con, "missing_evidence": miss, "uncertainties": uncertainties}

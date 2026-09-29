@@ -28,7 +28,7 @@ export interface Frames {
 export interface Statement { kind: string; section: string; text: string }
 
 export interface Candidate {
-  rank: number; score: number;
+  rank: number; score: number; synthetic?: boolean;
   vessel: { mmsi: string; imo?: string | null; name?: string | null; type: string };
   feature_scores_pct: Record<string, number>;
   source_distance_km: number | null; time_difference_hours: number | null; features: any;
@@ -79,8 +79,8 @@ export const api = {
     post("/api/v1/analyses", { scene_id, aoi, resolution_m, threshold }).then((r) => j<{ analysis_id: string }>(r)),
   upload: (form: FormData) =>
     fetch("/api/v1/analyses/upload", { method: "POST", body: form }).then((r) => j<{ analysis_id: string }>(r)),
-  investigate: (id: string, component_ids: string[], particles?: number, members?: number) =>
-    post(`/api/v1/analyses/${id}/investigate`, { component_ids, particles, members }).then((r) => j<{ analysis_id: string }>(r)),
+  investigate: (id: string, component_ids: string[], ais_mode?: "auto" | "real" | "synthetic", particles?: number, members?: number) =>
+    post(`/api/v1/analyses/${id}/investigate`, { component_ids, ais_mode, particles, members }).then((r) => j<{ analysis_id: string }>(r)),
   events: (id: string, since: number, onEvent: (e: ProgressEvent) => void, onDone: (d: any) => void, onError: () => void) => {
     const es = new EventSource(`/api/v1/analyses/${id}/events?since=${since}`);
     es.addEventListener("progress", (m) => onEvent(JSON.parse((m as MessageEvent).data)));

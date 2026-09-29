@@ -75,22 +75,27 @@ def read_window(href: str, row0: int, col0: int, rows: int, cols: int, factor: i
     # fails with a clear error instead of hanging the analysis worker.
     from concurrent.futures import TimeoutError as FTimeout, wait
     from app.core.errors import InputImageError
-    pool = ThreadPoolExecutor(max_workers=min(workers, max(len(tasks), 1)))
-    try:
-        pending = list(tasks)
-        for attempt in range(2):
+    pending = list(tasks)
+    # 3 attempts; retries use fewer parallel connections and a longer deadline (Azure throttles bursts)
+    for attempt, n_workers in enumerate((min(workers, max(len(tasks), 1)), 4, 2)):
+        pool = ThreadPoolExecutor(max_workers=max(1, min(n_workers, len(pending))))
+        try:
             futs = {pool.submit(job, t): t for t in pending}
-            done_f, not_done = wait(futs, timeout=chunk_timeout_s * max(1, len(pending) / max(workers, 1)))
+            deadline = chunk_timeout_s * (attempt + 1) * max(1, len(pending) / n_workers)
+            done_f, not_done = wait(futs, timeout=deadline)
             failed = [futs[f] for f in not_done] + [futs[f] for f in done_f if f.exception() is not None]
-            if not failed:
-                break
-            pending = failed
-            local.__dict__.clear()                      # force new dataset handles for the retry
-        else:
-            raise InputImageError(f"Sentinel-1 download stalled: {len(pending)} image chunk(s) did not arrive.",
-                                  "The Planetary Computer blob storage is slow or unreachable right now; retry.")
-    finally:
-        pool.shutdown(wait=False, cancel_futures=True)
+        finally:
+            pool.shutdown(wait=False, cancel_futures=True)
+        if not failed:
+            break
+        pending = failed
+        local.__dict__.clear()                          # force new dataset handles for the retry
+        if progress:
+            progress(f"{len(pending)} image chunk(s) slow — retrying with fewer connections (attempt {attempt + 2}/3)")
+    else:
+        raise InputImageError(f"Sentinel-1 download stalled: {len(pending)} image chunk(s) did not arrive after 3 "
+                              "attempts.", "The Planetary Computer storage is slow right now: retry later, choose a "
+                              "smaller area, or use a SYNTHETIC scene for demonstration.")
     if f_read == 1 and factor > 1:                      # no matching overview: block-average
         h, w = (nr // factor) * factor, (nc // factor) * factor
         out = out[:h, :w].reshape(h // factor, factor, w // factor, factor).mean(axis=(1, 3))

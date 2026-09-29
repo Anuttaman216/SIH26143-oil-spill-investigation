@@ -116,8 +116,28 @@ def sos_normalize(db: np.ndarray, sea: np.ndarray, res_m: float, window_km: floa
     gray_per_db = target_std / s
     u8 = np.clip(target_bg + anom * gray_per_db, 0, 255)
     u8[~sea] = target_bg
+    sos_normalize.last_anomaly = np.where(sea, anom, 0).astype(np.float16)   # dB above local sea (ship detection)
     return u8.astype(np.uint8), {"mode": "sos_matched", "background_percentile": percentile, "window_km": window_km,
                                  "speckle_std_db": float(s), "gray_per_db": float(gray_per_db)}
+
+
+def clip_aoi_to_scene(item_id: str, aoi: list[float], min_fraction: float = 0.05) -> tuple[list[float], float]:
+    """Bounding box of (AOI ∩ scene footprint) and the covered fraction. Partially covering scenes are cropped
+    instead of downloading and processing large no-data areas."""
+    from shapely.geometry import box, shape
+    item = _client().get_collection(COLLECTION).get_item(item_id)
+    if item is None:
+        raise InputImageError(f"Sentinel-1 item {item_id} not found", "Search scenes again.")
+    a = box(*aoi)
+    inter = shape(item.geometry).intersection(a)
+    frac = inter.area / a.area if a.area else 0.0
+    if frac < min_fraction:
+        raise InputImageError(f"The selected scene covers only {100 * frac:.0f}% of the area of interest.",
+                              "Pick a scene with more coverage, move the box inside a footprint, or use a SYNTHETIC "
+                              "scene for demonstration.")
+    if frac > 0.95:
+        return aoi, frac
+    return [round(v, 5) for v in inter.bounds], frac
 
 
 def ingest_scene(item_id: str, aoi: list[float], out_dir: Path, res_m: float = 10.0,
@@ -182,6 +202,7 @@ def ingest_scene(item_id: str, aoi: list[float], out_dir: Path, res_m: float = 1
                        SCALING=f"sos_matched gray_per_db={radiometry['gray_per_db']:.3f} speckle_std_db={radiometry['speckle_std_db']:.2f}",
                        PIXEL_SPACING_M=str(res_m))
     np.save(out_dir / (tif.stem + "_sea.npy"), sea)
+    np.save(out_dir / (tif.stem + "_anom.npy"), sos_normalize.last_anomaly)     # unclipped dB anomaly
     return {"path": str(tif), "sea_mask": str(out_dir / (tif.stem + "_sea.npy")), "item_id": item_id,
             "acquired": item.properties["datetime"], "platform": item.properties.get("platform"),
             "orbit_state": item.properties.get("sat:orbit_state"), "aoi": aoi, "resolution_m": res_m,

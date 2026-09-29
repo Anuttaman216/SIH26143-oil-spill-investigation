@@ -52,7 +52,8 @@ def test_no_georef_gives_partial_with_actionable_message(cfg, model):
 
 def test_no_forcing_gives_partial(cfg, model, demo_ready):
     from app.core.config import load_config
-    c2 = load_config(overrides={**cfg, "environment": {**cfg["environment"], "current_files": ["tests/none.nc"]}})
+    c2 = load_config(overrides={**cfg, "environment": {**cfg["environment"], "mode": "real",
+                                                       "current_files": ["tests/none.nc"]}})
     an = P.run_full(c2, str(FIXTURE_SCENE))
     assert an.state["status"] == "PARTIAL"
     assert "environmental forcing data are unavailable" in an.state["error"]["message"]
@@ -79,3 +80,17 @@ def test_api_endpoints(cfg, e2e, monkeypatch):
     assert client.get(f"/api/spill/{sid}/files/../../secret").status_code == 404
     assert client.post("/api/v1/analyses", json={"scene_id": "x", "aoi": [1, 1, 0, 0]}).status_code == 400
     assert "event: done" in client.get(f"/api/v1/analyses/{sid}/events").text
+
+
+def test_synthetic_ais_investigation_is_labelled_end_to_end(cfg, e2e):
+    an = P.run_investigation(cfg, e2e.id, None, particles=60, members=2, ais_mode="synthetic")
+    assert an.state["status"] == "COMPLETED", an.state.get("error")
+    c = an.load("candidates.json")
+    assert c["ais"]["synthetic"] is True and c["ais"]["provider"]["provenance"] == "SYNTHETIC_DEMO"
+    assert c["candidates"] and all(x["synthetic"] and x["vessel"]["name"].startswith("SYN-") for x in c["candidates"])
+    assert all(s["text"].startswith("[SYNTHETIC AIS]") for x in c["candidates"] for s in x["evidence"]["statements"]
+               if s["section"] in ("AIS", "Assessment"))
+    md = (an.repo.dir(an.id) / "report.md").read_text(encoding="utf-8")
+    assert "SYNTHETIC" in md and "not real" in md.lower()
+    assert any("SYNTHETIC" in w for w in an.state["warnings"])
+    assert an.load("ais/synthetic_truth.json")["vessels"]

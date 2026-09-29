@@ -100,6 +100,12 @@ def build_ais_provider(cfg, progress=None) -> AISProvider:
     if a.provider == "dma":
         from app.ais.dma_provider import DMAAISProvider
         return DMAAISProvider(cfg.path(a.get("cache_dir", "data/ais/cache")), a.get("thin_seconds", 60), progress)
+    if a.provider == "gfw":
+        from app.ais.gfw_provider import GFWPresenceAISProvider
+        return GFWPresenceAISProvider(progress=progress)
+    if a.provider == "synthetic":
+        from app.ais.synthetic_provider import SyntheticAISProvider
+        return SyntheticAISProvider(dict(a.get("synthetic", {})))
     if a.provider == "local":
         return LocalAISProvider([cfg.path(p) for p in a.files], a.get("column_map", "default"))
     raise AISDataError(f"Unknown ais.provider '{a.provider}'",

@@ -47,8 +47,27 @@ def build_report(an) -> dict:
         "Evidence Correlation Score weights are a prototype heuristic, not calibrated probabilities.",
         "AIS coverage may be incomplete; vessels without AIS cannot be ranked (see SAR ship detection).",
     ]
-    data_prov = {"sar_image": "SOS dataset tile (real SAR pixels)" if "sample" in str(scene.get("path", "")).lower()
-                 or "demo" in str(scene.get("path", "")).lower() else "user-supplied",
+    ais_sel = (cand or {}).get("ais", {}) or {}
+    if ais_sel.get("synthetic"):
+        sel = ais_sel.get("selection") or {}
+        assumptions.insert(0, "AIS vessel data are SYNTHETIC: generated around the spill region to demonstrate the "
+                              "algorithm, as permitted by SIH26143 (\"Real AIS if available may be used else synthetic "
+                              "data can be prepared for the region of oil spill to demonstrate the functioning of the "
+                              "algorithm\"). No synthetic vessel is real."
+                              + (f" Real AIS attempts: {sel.get('fallback_reason')}." if sel.get("fallback_reason") else ""))
+    acq = _try(an, "acquisition.json") or {}
+    if acq.get("provenance") == "SYNTHETIC_DEMO":
+        assumptions.insert(0, "The SAR scene is SYNTHETIC (generated for the drawn area because no usable real "
+                              "Sentinel-1 coverage was selected): speckle, wind texture, ships, one ship-trailing "
+                              "discharge and a natural look-alike. It is not a satellite observation.")
+    if drift and str(drift["forcing"]["provenance"]).startswith("SYNTHETIC"):
+        assumptions.insert(0, "Currents and wind are SYNTHETIC (Indian-waters monsoon-climatology-inspired analytic "
+                              "field) because real forcing was unavailable.")
+    sar_src = ("SYNTHETIC SAR scene (demonstration)" if acq.get("provenance") == "SYNTHETIC_DEMO" else
+               f"Sentinel-1 {acq.get('item_id')} (real, {acq.get('provenance')})" if acq else
+               "SOS dataset tile (real SAR pixels)" if "sample" in str(scene.get("path", "")).lower()
+               or "demo" in str(scene.get("path", "")).lower() else "user-supplied")
+    data_prov = {"sar_image": sar_src,
                  "georeferencing": (scene.get("georef") or {}).get("provenance", "UNAVAILABLE"),
                  "environmental_forcing": drift["forcing"]["provenance"] if drift else "UNAVAILABLE",
                  "ais": cand["ais"]["provider"]["provenance"] if cand else "UNAVAILABLE"}

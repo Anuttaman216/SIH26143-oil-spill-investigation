@@ -42,9 +42,14 @@ SOURCES = [
     {"id": "cdse", "name": "Copernicus Data Space Ecosystem", "kind": "SAR imagery (alternative)",
      "key_required": True, "env": ["CDSE_USERNAME", "CDSE_PASSWORD"], "integrated": False, "coverage": "Global",
      "notes": "Optional alternative to Planetary Computer (free account)."},
-    {"id": "gfw", "name": "Global Fishing Watch API", "kind": "Vessel identity / events (upgrade)",
-     "key_required": True, "env": ["GFW_API_TOKEN"], "integrated": False, "coverage": "Global",
-     "notes": "Optional enrichment of vessel identity and gap events (free token)."},
+    {"id": "gfw", "name": "Global Fishing Watch 4Wings AIS vessel presence", "kind": "AIS (Indian waters)",
+     "key_required": True, "env": ["GFW_API_TOKEN"], "integrated": True, "coverage": "Global incl. Indian EEZ",
+     "notes": "Real AIS-derived presence: 1 position per vessel per hour, 0.01 deg cells, all vessel types. Free "
+              "non-commercial token. Used automatically (ais.mode auto/real) when GFW_API_TOKEN is set."},
+    {"id": "synthetic_ais", "name": "Synthetic AIS generator (Indian waters)", "kind": "AIS (fallback)",
+     "key_required": False, "env": [], "integrated": True, "coverage": "Any region (presets for Indian waters)",
+     "notes": "Used when no real AIS is available (ais.mode auto) or on request (synthetic). Always labelled "
+              "SYNTHETIC; permitted by SIH26143 for demonstrating the algorithm."},
     {"id": "india_ais", "name": "Indian-waters historical AIS (INCOIS / DG Shipping NAIS / commercial)", "kind": "AIS",
      "key_required": True, "env": ["INDIA_AIS_API_KEY"], "integrated": False, "coverage": "Indian EEZ",
      "notes": "Institutional or paid access; implement AISProvider when available."},

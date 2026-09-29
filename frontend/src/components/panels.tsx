@@ -1,7 +1,7 @@
 import { useState } from "react";
 import {
-  AlertTriangle, CalendarRange, CheckCircle2, CircleDashed, Crosshair, Database, KeyRound, Loader2, MousePointerSquareDashed,
-  Pause, Play, Radar, Search, Ship, Upload, Waves, Wind, XCircle,
+  AlertTriangle, CalendarRange, CheckCircle2, ChevronDown, CircleDashed, Crosshair, Database, Info, KeyRound, Loader2,
+  MousePointerSquareDashed, Pause, Play, Radar, Search, Ship, Upload, Waves, Wind, XCircle,
 } from "lucide-react";
 import type { BBox, Candidate, Layers, ProgressEvent, Scene, Source, TriageRow } from "@/api";
 import { fmtT, n } from "@/api";
@@ -25,6 +25,7 @@ export function Prov({ p }: { p?: string | null }) {
   const v = p ?? "UNAVAILABLE";
   const map: Record<string, [string, string]> = {
     LIVE_EXTERNAL: ["LIVE", "bg-emerald-500/15 text-emerald-300 border-emerald-500/30"],
+    SYNTHETIC_DEMO: ["SYNTHETIC", "bg-amber-500/20 text-amber-300 border-amber-500/50"],
     LOCAL_FILE: ["LOCAL FILE", "bg-sky-500/15 text-sky-300 border-sky-500/30"],
     UNAVAILABLE: ["UNAVAILABLE", "bg-rose-500/15 text-rose-300 border-rose-500/30"],
   };
@@ -44,11 +45,37 @@ const Field = ({ label, children }: { label: string; children: React.ReactNode }
   <div className="grid gap-1.5"><Label className="text-xs text-muted-foreground">{label}</Label>{children}</div>;
 
 const Stat = ({ icon: Icon, label, value, sub }: { icon: any; label: string; value: React.ReactNode; sub?: React.ReactNode }) => (
-  <div className="rounded-lg border bg-muted/30 p-2.5">
-    <div className="flex items-center gap-1.5 text-[11px] text-muted-foreground"><Icon className="size-3.5" />{label}</div>
-    <div className="mt-0.5 text-sm font-semibold">{value}</div>
-    {sub && <div className="text-[11px] text-muted-foreground">{sub}</div>}
+  <div className="group relative overflow-hidden rounded-xl border border-slate-700/50 bg-gradient-to-b from-slate-800/50 to-slate-900/40 p-2.5 transition hover:border-cyan-500/40">
+    <div className="pointer-events-none absolute -right-4 -top-4 size-12 rounded-full bg-cyan-500/10 blur-xl transition group-hover:bg-cyan-500/20" />
+    <div className="flex items-center gap-1.5 text-[10px] uppercase tracking-wider text-slate-400">
+      <span className="grid size-5 place-items-center rounded-md bg-cyan-500/10 text-cyan-300"><Icon className="size-3" /></span>{label}</div>
+    <div className="mt-1.5 font-mono text-[15px] font-semibold text-slate-50">{value}</div>
+    {sub && <div className="truncate text-[10.5px] text-slate-400">{sub}</div>}
   </div>
+);
+
+/** Compact, collapsible notice (replaces tall alert boxes). */
+export function Callout({ tone = "amber", title, children, defaultOpen = false }: {
+  tone?: "amber" | "sky" | "rose"; title: React.ReactNode; children?: React.ReactNode; defaultOpen?: boolean;
+}) {
+  const [open, setOpen] = useState(defaultOpen);
+  const c = { amber: "border-amber-500/35 bg-amber-500/[0.07] text-amber-200", sky: "border-sky-500/30 bg-sky-500/[0.06] text-sky-200",
+    rose: "border-rose-500/35 bg-rose-500/[0.07] text-rose-200" }[tone];
+  const I = tone === "sky" ? Info : AlertTriangle;
+  return (
+    <div className={cn("rounded-lg border text-xs", c)}>
+      <button className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left" onClick={() => children && setOpen(!open)}>
+        <I className="size-3.5 shrink-0" /><span className="flex-1 font-medium">{title}</span>
+        {children && <ChevronDown className={cn("size-3.5 shrink-0 opacity-70 transition", open && "rotate-180")} />}
+      </button>
+      {open && children && <div className="px-2.5 pb-2 pl-8 text-[11px] leading-relaxed text-slate-300/90">{children}</div>}
+    </div>
+  );
+}
+
+export const SectionLabel = ({ children, right }: { children: React.ReactNode; right?: React.ReactNode }) => (
+  <div className="flex items-center gap-2 font-mono text-[10px] uppercase tracking-[0.18em] text-slate-400">
+    <span className="size-1 rounded-full bg-cyan-400" />{children}<span className="h-px flex-1 bg-slate-700/60" />{right}</div>
 );
 
 // ---------------------------------------------------------------------------------------------------
@@ -56,7 +83,7 @@ export function SearchPanel(props: {
   aoi: BBox | null; setAoi: (b: BBox | null) => void; drawing: boolean; setDrawing: (b: boolean) => void;
   scenes: Scene[]; sceneId: string | null; setSceneId: (id: string) => void; busy: boolean;
   onSearch: (start: string, end: string) => void; searching: boolean;
-  onDetect: (res: number) => void; onUpload: (f: FormData) => void;
+  onDetect: (res: number) => void; onUpload: (f: FormData) => void; searched: boolean; onSynthetic: () => void;
 }) {
   const today = new Date();
   const iso = (d: Date) => d.toISOString().slice(0, 10);
@@ -71,7 +98,7 @@ export function SearchPanel(props: {
       <Card size="sm">
         <CardHeader>
           <CardTitle className="flex items-center gap-2 text-sm"><MousePointerSquareDashed className="size-4 text-primary" />1 · Area of interest</CardTitle>
-          <CardDescription className="text-xs">Draw a box on the map over water (Danish waters have free historical AIS).</CardDescription>
+          <CardDescription className="text-xs">Draw a box over Indian waters (≤ 1° per side). Real Sentinel-1 and Open-Meteo data are used where available; missing data are replaced by clearly labelled SYNTHETIC data.</CardDescription>
         </CardHeader>
         <CardContent className="grid gap-2.5">
           <div className="flex gap-2">
@@ -101,13 +128,16 @@ export function SearchPanel(props: {
           {props.scenes.length > 0 && <div className="grid max-h-72 gap-1.5 overflow-y-auto pr-1">
             {props.scenes.map((s) => (
               <button key={s.id} onClick={() => props.setSceneId(s.id)}
-                className={cn("flex items-center gap-2 rounded-lg border p-1.5 text-left transition-colors hover:bg-accent",
-                  props.sceneId === s.id && "border-primary bg-primary/10")}>
+                className={cn("flex items-center gap-2 rounded-lg border border-slate-700/50 bg-slate-900/40 p-1.5 text-left transition hover:border-cyan-500/40 hover:bg-slate-800/50",
+                  props.sceneId === s.id && "border-cyan-400/70 bg-cyan-500/10 shadow-[0_0_16px_rgb(34_211_238/0.15)]")}>
                 {s.thumbnail ? <img src={s.thumbnail} className="size-11 rounded object-cover opacity-90" alt="" />
                   : <div className="size-11 rounded bg-muted" />}
                 <div className="min-w-0 text-xs">
                   <div className="font-medium">{fmtT(s.datetime)}</div>
-                  <div className="text-muted-foreground">{s.platform} · {s.orbit_state} · covers {Math.round(100 * s.aoi_coverage)}%</div>
+                  <div className="text-muted-foreground">{s.platform} · {s.orbit_state}</div>
+                  <div className="mt-0.5 flex items-center gap-1"><Prov p="LIVE_EXTERNAL" />
+                    <span className={cn(s.aoi_coverage < 0.5 ? "text-amber-300" : "text-emerald-300")}>
+                      covers {Math.round(100 * s.aoi_coverage)}% of your box</span></div>
                 </div>
               </button>))}
           </div>}
@@ -119,6 +149,17 @@ export function SearchPanel(props: {
             <Button size="sm" className="flex-1" disabled={!props.sceneId || props.busy} onClick={() => props.onDetect(+res)}>
               <Radar />Acquire & detect</Button>
           </div>}
+          {props.searched && (() => {
+            const best = Math.max(0, ...props.scenes.map((s) => s.aoi_coverage));
+            if (best >= 0.5) return null;
+            return <Callout defaultOpen title={props.scenes.length ? `Real Sentinel-1 covers at most ${Math.round(100 * best)}% of this box`
+                : "No real Sentinel-1 scene for this box and period"}>Sentinel-1 revisits Indian waters less often than Europe. A partially
+                covering real scene is clipped to the covered part. To demonstrate the full chain here, use a SYNTHETIC SAR
+                scene (clearly labelled, not an observation).</Callout>;
+          })()}
+          <Button size="sm" variant="outline" disabled={!props.aoi || props.busy} onClick={props.onSynthetic}
+            className="border-amber-500/40 text-amber-200">
+            <Radar />Use SYNTHETIC SAR scene for this box (demo)</Button>
         </CardContent>
       </Card>
       <Card size="sm">
@@ -138,11 +179,13 @@ export function SearchPanel(props: {
 
 // ---------------------------------------------------------------------------------------------------
 export function TriagePanel(props: { d: Layers; checked: Set<string>; toggle: (id: string) => void;
-  onFocus: (r: TriageRow) => void; onInvestigate: () => void; busy: boolean }) {
+  onFocus: (r: TriageRow) => void; onInvestigate: (aisMode: "auto" | "real" | "synthetic") => void; busy: boolean }) {
+  const [aisMode, setAisMode] = useState<"auto" | "real" | "synthetic">("auto");
   const t = props.d.triage;
   const [filter, setFilter] = useState<"all" | "trail" | "oil">("all");
   if (!t) return <Empty text={props.d.analysis?.error?.message ?? "Run a detection first."} />;
   const rows = t.components.filter((r) => filter === "all" || (filter === "trail" ? r.ship_trail : r.label === "OIL_LIKELY"));
+  const synScene = props.d.acquisition?.provenance === "SYNTHETIC_DEMO";
   const w = t.wind_at_acquisition;
   const lowWind = w && w.wind_speed_ms < 3;
   return (
@@ -150,19 +193,21 @@ export function TriagePanel(props: { d: Layers; checked: Set<string>; toggle: (i
       <div className="grid grid-cols-3 gap-2">
         <Stat icon={Wind} label="Wind at acquisition" value={w ? `${n(w.wind_speed_ms, 1)} m/s` : "n/a"} sub={w?.source} />
         <Stat icon={Waves} label="Dark features" value={t.components.length} sub={`${t.components.filter((r) => r.label === "OIL_LIKELY").length} oil-likely`} />
-        <Stat icon={Ship} label="SAR point targets" value={t.sar_ship_detection?.n_detections ?? 0} sub="untrained CFAR" />
+        <Stat icon={Ship} label="SAR point targets" value={t.sar_ship_detection?.n_detections ?? 0} sub="untrained baseline detector" />
       </div>
-      {lowWind && <Alert className="border-amber-500/40 bg-amber-500/10">
-        <AlertTriangle className="text-amber-300" /><AlertTitle className="text-amber-200">Low wind scene</AlertTitle>
-        <AlertDescription className="text-xs">Below ~3 m/s natural films and calm zones look like oil. Treat detections with caution.</AlertDescription>
-      </Alert>}
-      <div className="flex items-center gap-1.5">
+      {synScene && <Callout title="SYNTHETIC SAR scene — not a satellite observation">Generated for this box because no usable
+        real Sentinel-1 coverage was selected: speckle, wind texture, ships, one ship-trailing discharge and a natural look-alike.
+        The detection model and triage run exactly as on real data.</Callout>}
+      {lowWind && <Callout title={`Low wind (${n(w.wind_speed_ms, 1)} m/s) — look-alikes likely`}>Below ~3 m/s natural films and
+        calm zones look like oil. Treat detections with caution.</Callout>}
+      <SectionLabel right={<span className="normal-case tracking-normal text-cyan-300">{props.checked.size} selected</span>}>Dark features</SectionLabel>
+      <div className="flex items-center gap-1 rounded-lg border border-slate-700/50 bg-slate-900/40 p-0.5">
         {(["all", "trail", "oil"] as const).map((f) => (
-          <Button key={f} size="xs" variant={filter === f ? "secondary" : "ghost"} onClick={() => setFilter(f)}>
-            {f === "all" ? "All" : f === "trail" ? "Ship trails" : "Oil-likely"}</Button>))}
-        <span className="ml-auto text-xs text-muted-foreground">{props.checked.size} selected</span>
+          <button key={f} onClick={() => setFilter(f)} className={cn("flex-1 rounded-md px-2 py-1 text-[11px] transition",
+            filter === f ? "bg-cyan-500/15 text-cyan-200 shadow-[inset_0_0_0_1px_rgb(34_211_238/0.3)]" : "text-slate-400 hover:text-slate-100")}>
+            {f === "all" ? `All (${t.components.length})` : f === "trail" ? "Ship trails" : "Oil-likely"}</button>))}
       </div>
-      <div className="max-h-[46vh] overflow-y-auto rounded-lg border">
+      <div className="max-h-[42vh] overflow-y-auto rounded-xl border border-slate-700/50 bg-slate-900/30">
         <Table>
           <TableHeader><TableRow>
             <TableHead className="w-8" /><TableHead>#</TableHead><TableHead>Triage</TableHead>
@@ -185,7 +230,16 @@ export function TriagePanel(props: { d: Layers; checked: Set<string>; toggle: (i
         </Table>
       </div>
       <p className="text-[11px] leading-snug text-muted-foreground">{t.note} Click a row to zoom; tick the slick(s) you judge to be oil.</p>
-      <Button disabled={!props.checked.size || props.busy} onClick={props.onInvestigate}>
+      <SectionLabel>Investigate</SectionLabel>
+      <Field label="AIS source">
+        <select className="h-8 rounded-lg border bg-transparent px-2 text-xs" value={aisMode}
+          onChange={(e) => setAisMode(e.target.value as "auto" | "real" | "synthetic")}>
+          <option value="auto">Auto — real AIS if available, else SYNTHETIC (labelled)</option>
+          <option value="real">Real AIS only (no synthetic fallback)</option>
+          <option value="synthetic">SYNTHETIC AIS (demonstration, SIH26143-permitted)</option>
+        </select></Field>
+      <Button disabled={!props.checked.size || props.busy} onClick={() => props.onInvestigate(aisMode)}
+        className="shadow-[0_0_20px_rgb(34_211_238/0.25)]">
         <Radar />Investigate {props.checked.size || ""} selected slick{props.checked.size === 1 ? "" : "s"}</Button>
     </div>
   );
@@ -211,8 +265,11 @@ export function InvestigationPanel({ d }: { d: Layers }) {
   const s = d.selected, dr = d.drift, fw = d.forward;
   if (!dr) return <Empty text={d.analysis?.error?.message ?? "Select slick(s) in Triage and start the investigation."} />;
   const f = dr.forcing_at_spill;
+  const synForcing = String(dr.forcing?.provenance ?? "").startsWith("SYNTHETIC");
   return (
     <div className="grid gap-3">
+      {synForcing && <Callout title="SYNTHETIC currents & wind">Real forcing (Open-Meteo) was unavailable, so a
+        monsoon-climatology-inspired analytic field for Indian waters was used. Drift results illustrate the method only.</Callout>}
       <Card size="sm">
         <CardHeader><CardTitle className="text-sm">Investigated slick</CardTitle>
           <CardDescription className="text-xs">{s?.selected_component_ids?.map((c: string) => c.split("_").pop()).join(", ")}</CardDescription></CardHeader>
@@ -231,8 +288,10 @@ export function InvestigationPanel({ d }: { d: Layers }) {
             <Stat icon={Wind} label="Wind at slick" value={`${n(f.wind_speed, 1)} m/s`} sub={`from ${n(f.wind_from_deg, 0)}°`} />
             <Stat icon={Waves} label="Current at slick" value={`${n(f.current_speed, 2)} m/s`} sub={`toward ${n(f.current_to_deg, 0)}°`} />
           </div>
-          <div><span className="text-muted-foreground">Release window:</span> {fmtT(dr.release_window.start)} → {fmtT(dr.release_window.end)}
-            <div className="text-[11px] text-muted-foreground">{dr.release_window.prior}</div></div>
+          <div className="rounded-lg border border-slate-700/50 bg-slate-900/40 p-2">
+            <div className="font-mono text-[10px] uppercase tracking-wider text-slate-400">Release window</div>
+            <div className="mt-0.5 font-mono text-[11.5px] text-slate-100">{fmtT(dr.release_window.start)} → {fmtT(dr.release_window.end)}</div>
+            <div className="text-[11px] text-muted-foreground">{dr.release_window.basis ?? dr.release_window.prior}</div></div>
           <div className="flex flex-wrap gap-1.5">{Object.entries(dr.source_regions).map(([k, v]: any) => (
             <Badge key={k} variant="outline" className={cn("text-[10px]", k === "high" ? "text-red-300" : k === "medium" ? "text-orange-300" : "text-yellow-200")}>
               {k} {Math.round(v.mass_fraction * 100)}% · {n(v.area_km2, 0)} km²</Badge>))}</div>
@@ -254,31 +313,35 @@ export function CandidatesPanel(props: { d: Layers; selected: Candidate | null; 
   if (!r) return <Empty text="No candidate analysis yet." />;
   return (
     <div className="grid gap-3">
-      <Alert className="border-sky-500/30 bg-sky-500/5"><AlertTriangle className="text-sky-300" />
-        <AlertTitle className="text-xs">Candidate vessels requiring investigation</AlertTitle>
-        <AlertDescription className="text-[11px]">{r.disclaimer}</AlertDescription></Alert>
-      <div className="flex items-center justify-between text-xs">
-        <span>{r.message}</span><Prov p={r.ais?.provider?.provenance} /></div>
-      {r.ranking_separation && <p className="text-[11px] text-amber-200/90">{r.ranking_separation.note}</p>}
-      <div className="max-h-[48vh] overflow-y-auto rounded-lg border">
-        <Table>
-          <TableHeader><TableRow><TableHead>#</TableHead><TableHead>Vessel</TableHead><TableHead>Score</TableHead>
-            <TableHead className="text-right">Dist.</TableHead><TableHead className="text-right">Δt</TableHead></TableRow></TableHeader>
-          <TableBody>
-            {r.candidates.map((c: Candidate) => (
-              <TableRow key={c.vessel.mmsi} className="cursor-pointer" data-state={props.selected?.vessel.mmsi === c.vessel.mmsi ? "selected" : undefined}
-                onClick={() => props.select(c)}>
-                <TableCell className="text-xs text-muted-foreground">{c.rank}</TableCell>
-                <TableCell><div className="text-xs font-medium">{c.vessel.name ?? c.vessel.mmsi}
-                  {c.features?.sar_attached?.matched && <Ship className="ml-1 inline size-3.5 text-cyan-300" />}</div>
-                  <div className="text-[11px] text-muted-foreground">{c.vessel.type} · {c.vessel.mmsi}</div></TableCell>
-                <TableCell className="w-28"><div className="flex items-center gap-1.5"><Progress value={c.score} className="h-1.5" />
-                  <span className="w-8 text-right text-xs font-semibold">{n(c.score, 0)}</span></div></TableCell>
-                <TableCell className="text-right text-xs">{n(c.source_distance_km, 1)} km</TableCell>
-                <TableCell className="text-right text-xs">{n(c.time_difference_hours, 1)} h</TableCell>
-              </TableRow>))}
-          </TableBody>
-        </Table>
+      {r.ais?.synthetic && <SyntheticBanner reason={r.ais?.selection?.fallback_reason} />}
+      <Callout tone="sky" title="Candidates for investigation — not a finding of responsibility">{r.disclaimer}</Callout>
+      <SectionLabel right={<Prov p={r.ais?.provider?.provenance} />}>{r.candidates.length} ranked vessel{r.candidates.length === 1 ? "" : "s"}</SectionLabel>
+      {r.ranking_separation && <p className={cn("text-[11px]", r.ranking_separation.separable ? "text-emerald-300/90" : "text-amber-200/90")}>
+        {r.ranking_separation.note}</p>}
+      <div className="grid max-h-[50vh] gap-1.5 overflow-y-auto pr-0.5">
+        {r.candidates.map((c: Candidate) => {
+          const sel = props.selected?.vessel.mmsi === c.vessel.mmsi;
+          return (
+            <button key={c.vessel.mmsi} onClick={() => props.select(c)}
+              className={cn("group grid grid-cols-[28px_1fr_auto] items-center gap-2.5 rounded-xl border p-2 text-left transition",
+                sel ? "border-cyan-400/70 bg-cyan-500/10 shadow-[0_0_18px_rgb(34_211_238/0.18)]"
+                  : "border-slate-700/50 bg-slate-900/40 hover:border-cyan-500/40 hover:bg-slate-800/50")}>
+              <span className={cn("grid size-7 place-items-center rounded-lg font-mono text-xs font-bold",
+                c.rank === 1 ? "bg-gradient-to-br from-cyan-300 to-sky-500 text-slate-950" : "border border-slate-600 text-slate-300")}>{c.rank}</span>
+              <div className="min-w-0">
+                <div className="flex items-center gap-1.5 truncate text-[12.5px] font-semibold text-slate-100">{c.vessel.name ?? c.vessel.mmsi}
+                  {c.features?.sar_attached?.matched && <span title="Seen by SAR at the slick" className="inline-flex items-center gap-0.5 rounded bg-cyan-500/15 px-1 text-[9px] font-medium text-cyan-300"><Ship className="size-2.5" />SAR</span>}
+                  {c.synthetic && <span className="rounded border border-amber-500/40 px-1 text-[9px] font-medium text-amber-300">SYN</span>}</div>
+                <div className="truncate font-mono text-[10.5px] text-slate-400">{c.vessel.type ?? "Unknown"} · {c.vessel.mmsi}</div>
+                <div className="mt-1 h-1 overflow-hidden rounded-full bg-slate-800">
+                  <div className="h-full rounded-full bg-gradient-to-r from-cyan-500 via-sky-400 to-indigo-400" style={{ width: `${c.score}%` }} /></div>
+              </div>
+              <div className="text-right">
+                <div className="font-mono text-base font-bold leading-none text-slate-50">{n(c.score, 0)}</div>
+                <div className="mt-1 font-mono text-[10px] text-slate-400">{n(c.source_distance_km, 1)} km · {n(c.time_difference_hours, 1)} h</div>
+              </div>
+            </button>);
+        })}
       </div>
       <div className="flex items-center gap-2 text-xs">
         <Switch checked={showFiltered} onCheckedChange={setShowFiltered} /> Show {r.filtered_out?.length ?? 0} filtered vessels & reasons</div>
@@ -298,17 +361,53 @@ const KIND: Record<string, [string, string]> = {
   CANDIDATE_INFERENCE: ["Inference", "bg-emerald-500/15 text-emerald-300 border-emerald-500/30"],
 };
 
+export function SyntheticBanner({ reason }: { reason?: string | null }) {
+  return (
+    <Callout title="SYNTHETIC AIS — not real vessels">Vessel tracks were generated around the spill region to demonstrate the
+      algorithm (permitted by SIH26143 when real AIS is unavailable). No synthetic vessel exists.
+      {reason ? ` Real AIS: ${reason}.` : ""}</Callout>
+  );
+}
+
+function ScoreRing({ v }: { v: number }) {
+  const r = 26, c = 2 * Math.PI * r;
+  return (
+    <div className="relative size-16 shrink-0">
+      <svg viewBox="0 0 64 64" className="size-16 -rotate-90">
+        <circle cx="32" cy="32" r={r} fill="none" stroke="rgb(51 65 85 / 0.6)" strokeWidth="5" />
+        <circle cx="32" cy="32" r={r} fill="none" stroke="url(#ring)" strokeWidth="5" strokeLinecap="round"
+          strokeDasharray={c} strokeDashoffset={c * (1 - v / 100)} style={{ transition: "stroke-dashoffset 1s ease" }} />
+        <defs><linearGradient id="ring"><stop offset="0" stopColor="#22d3ee" /><stop offset="1" stopColor="#818cf8" /></linearGradient></defs>
+      </svg>
+      <div className="absolute inset-0 grid place-items-center"><div className="text-center leading-none">
+        <div className="font-mono text-lg font-bold text-slate-50">{n(v, 0)}</div><div className="text-[8px] tracking-wider text-slate-400">SCORE</div></div></div>
+    </div>
+  );
+}
+
 export function EvidencePanel({ c }: { c: Candidate | null }) {
   if (!c) return <Empty text="Select a candidate vessel to inspect its evidence." />;
   const e = c.evidence;
   return (
     <div className="grid gap-3">
-      <div><div className="text-sm font-semibold">{c.vessel.name ?? c.vessel.mmsi}</div>
-        <div className="text-xs text-muted-foreground">MMSI {c.vessel.mmsi}{c.vessel.imo ? ` · IMO ${c.vessel.imo}` : ""} · {c.vessel.type}</div></div>
+      {c.synthetic && <SyntheticBanner />}
+      <div className="flex items-center gap-3 rounded-xl border border-slate-700/50 bg-gradient-to-br from-slate-800/60 to-slate-900/40 p-3">
+        <ScoreRing v={c.score} />
+        <div className="min-w-0">
+          <div className="flex items-center gap-2"><span className="grid size-5 place-items-center rounded bg-cyan-500/15 font-mono text-[10px] text-cyan-300">#{c.rank}</span>
+            <span className="truncate text-sm font-semibold text-slate-50">{c.vessel.name ?? c.vessel.mmsi}</span></div>
+          <div className="mt-0.5 font-mono text-[11px] text-slate-400">MMSI {c.vessel.mmsi}{c.vessel.imo ? ` · IMO ${c.vessel.imo}` : ""}</div>
+          <div className="text-[11px] text-slate-400">{c.vessel.type} · {n(c.source_distance_km, 1)} km from source · Δt {n(c.time_difference_hours, 1)} h</div>
+        </div>
+      </div>
+      <SectionLabel>Evidence factors</SectionLabel>
       <div className="grid gap-1.5">{Object.entries(c.feature_scores_pct).map(([k, v]) => (
-        <div key={k} className="grid grid-cols-[96px_1fr_32px] items-center gap-2 text-[11px]">
-          <span className="text-muted-foreground">{k.replace("_", " ")}</span><Progress value={v} className="h-1.5" /><span className="text-right">{n(v, 0)}</span></div>))}</div>
-      <Separator />
+        <div key={k} className="grid grid-cols-[104px_1fr_30px] items-center gap-2 text-[11px]">
+          <span className="capitalize text-slate-400">{k.replace(/_/g, " ")}</span>
+          <div className="h-1.5 overflow-hidden rounded-full bg-slate-800"><div className="h-full rounded-full bg-gradient-to-r from-cyan-500 to-indigo-400"
+            style={{ width: `${v}%`, transition: "width .8s ease" }} /></div>
+          <span className="text-right font-mono text-slate-200">{n(v, 0)}</span></div>))}</div>
+      <SectionLabel>Statements</SectionLabel>
       <ul className="grid gap-2">{e.statements.map((s, i) => (
         <li key={i} className="text-xs leading-snug"><Badge variant="outline" className={cn("mr-1.5 text-[10px]", KIND[s.kind]?.[1])}>
           {KIND[s.kind]?.[0] ?? s.kind}</Badge><span className="text-muted-foreground">{s.section}: </span>{s.text}</li>))}</ul>
@@ -319,7 +418,7 @@ export function EvidencePanel({ c }: { c: Candidate | null }) {
       </div>
       <details className="text-xs"><summary className="cursor-pointer text-primary">Uncertainty</summary>
         <ul className="mt-1 list-disc space-y-0.5 pl-4 text-muted-foreground">{e.uncertainties.map((u, i) => <li key={i}>{u}</li>)}</ul></details>
-      <p className="rounded-lg border border-emerald-500/30 bg-emerald-500/5 p-2.5 text-xs">{e.summary}</p>
+      <p className="rounded-lg border border-emerald-500/30 bg-emerald-500/[0.06] p-2.5 text-xs leading-relaxed">{e.summary}</p>
     </div>
   );
 }
@@ -330,7 +429,9 @@ const EvList = ({ icon: Icon, cls, title, items }: { icon: any; cls: string; tit
 );
 
 export const Empty = ({ text }: { text: string }) =>
-  <div className="rounded-lg border border-dashed p-6 text-center text-xs text-muted-foreground">{text}</div>;
+  <div className="grid place-items-center gap-2 rounded-xl border border-dashed border-slate-700/70 p-8 text-center text-xs text-muted-foreground">
+    <div className="relative grid size-10 place-items-center"><span className="absolute size-10 animate-ping rounded-full border border-cyan-500/30" />
+      <Radar className="size-5 text-cyan-400/70" /></div>{text}</div>;
 
 // ---------------------------------------------------------------------------------------------------
 export function ProgressCard({ events, stages, busy }: { events: ProgressEvent[]; stages: string[]; busy: boolean }) {
@@ -339,13 +440,15 @@ export function ProgressCard({ events, stages, busy }: { events: ProgressEvent[]
   const idx = Math.max(0, stages.indexOf(last.stage));
   const pct = last.status === "COMPLETED" ? 100 : Math.round((100 * idx) / Math.max(stages.length - 1, 1));
   return (
-    <Card size="sm" className="w-[min(380px,calc(100vw-420px))] bg-card/95 backdrop-blur">
+    <Card size="sm" className="w-[min(380px,calc(100vw-420px))] border-slate-700/60 bg-slate-950/80 backdrop-blur-md">
       <CardContent className="grid gap-2">
         <div className="flex items-center gap-2 text-xs">
           {busy ? <Loader2 className="size-3.5 animate-spin text-primary" /> : <CheckCircle2 className="size-3.5 text-emerald-400" />}
-          <span className="font-semibold">{last.stage.replace(/_/g, " ")}</span>
-          <Badge variant="outline" className="ml-auto text-[10px]">{last.status.replace(/_/g, " ")}</Badge></div>
-        <Progress value={pct} className="h-1" />
+          <span className="font-mono font-semibold tracking-wide">{last.stage.replace(/_/g, " ")}</span>
+          <Badge variant="outline" className="ml-auto font-mono text-[10px]">{busy ? `${pct}%` : last.status.replace(/_/g, " ")}</Badge></div>
+        <div className="flex gap-0.5">{stages.map((st, i) => (
+          <span key={st} title={st.replace(/_/g, " ")} className={cn("h-1 flex-1 rounded-full transition-colors",
+            i < idx || last.status === "COMPLETED" ? "bg-cyan-400" : i === idx ? (busy ? "animate-pulse bg-cyan-300" : "bg-cyan-400") : "bg-slate-700")} />))}</div>
         <div className="line-clamp-2 text-[11px] text-muted-foreground">{last.message}</div>
       </CardContent>
     </Card>
@@ -360,14 +463,14 @@ export function Timeline(props: { times: { time: Date; kind: string }[]; idx: nu
   const dh = obs ? (cur.time.getTime() - obs.getTime()) / 3600e3 : 0;
   const rel = Math.abs(dh) < 0.01 ? "T (observation)" : `T ${dh < 0 ? "−" : "+"} ${Math.abs(dh).toFixed(0)} h`;
   return (
-    <Card size="sm" className="w-[min(760px,calc(100vw-400px))] bg-card/95 backdrop-blur">
+    <Card size="sm" className="w-full max-w-[760px] border-slate-700/60 bg-slate-950/80 backdrop-blur-md">
       <CardContent className="flex items-center gap-3">
         <Button size="icon-sm" onClick={() => props.setPlaying(!props.playing)}>{props.playing ? <Pause /> : <Play />}</Button>
         <div className="grid flex-1 gap-1">
           <input type="range" min={0} max={times.length - 1} value={idx} onChange={(e) => props.setIdx(+e.target.value)}
             className="w-full accent-[var(--primary)]" />
           <div className="flex items-center gap-2 text-xs">
-            <b>{rel}</b><span className="text-muted-foreground">{fmtT(cur.time.toISOString())}</span>
+            <b className="font-mono text-cyan-200">{rel}</b><span className="font-mono text-muted-foreground">{fmtT(cur.time.toISOString())}</span>
             <Badge variant="outline" className={cn("text-[10px]", cur.kind === "backward" ? "text-cyan-300" : "text-purple-300")}>
               {cur.kind === "backward" ? "hindcast" : "forecast"}</Badge></div>
         </div>
@@ -379,7 +482,7 @@ export function Timeline(props: { times: { time: Date; kind: string }[]; idx: nu
 export function LayerMenu(props: { visible: Record<LayerKey, boolean>; set: (k: LayerKey, v: boolean) => void;
   probLabel: string; probLabels: string[]; setProbLabel: (s: string) => void; follow: boolean; setFollow: (b: boolean) => void }) {
   return (
-    <Card size="sm" className="w-64 bg-card/95 backdrop-blur">
+    <Card size="sm" className="w-64 border-slate-700/60 bg-slate-950/85 backdrop-blur-md">
       <CardHeader><CardTitle className="text-xs">Map layers</CardTitle></CardHeader>
       <CardContent className="grid gap-1.5">
         {(Object.keys(LAYER_LABELS) as LayerKey[]).map((k) => (

@@ -24,8 +24,9 @@ class ShipDetector:
 class CFARShipDetector(ShipDetector):
     name = "CA-CFAR baseline (untrained)"
 
-    def __init__(self, guard=4, background=12, k=5.0, min_px=3, max_px=400):
+    def __init__(self, guard=4, background=12, k=5.0, min_px=3, max_px=400, min_grey=0):
         self.guard, self.bg, self.k, self.min_px, self.max_px = guard, background, k, min_px, max_px
+        self.min_grey = min_grey      # absolute brightness floor (normalised scenes: ships saturate near 255)
 
     def detect(self, gray: np.ndarray) -> list[dict]:
         img = gray.astype(np.float64)
@@ -37,15 +38,46 @@ class CFARShipDetector(ShipDetector):
         n = outer ** 2 - inner ** 2
         mu = (s_o - s_i) / n
         sd = np.sqrt(np.clip((q_o - q_i) / n - mu ** 2, 1e-9, None))
-        det = img > mu + self.k * sd
+        det = (img > np.minimum(mu + self.k * sd, 254.5)) & (img >= self.min_grey)
         lab, nlab = ndimage.label(det)
         out = []
-        for i in range(1, nlab + 1):
-            ys, xs = np.nonzero(lab == i)
+        # per-object slices (a full-image comparison per label was O(labels x pixels) and stalled on busy scenes)
+        for i, sl in enumerate(ndimage.find_objects(lab), start=1):
+            if sl is None:
+                continue
+            ys, xs = np.nonzero(lab[sl] == i)
             if self.min_px <= len(ys) <= self.max_px:
+                ys, xs = ys + sl[0].start, xs + sl[1].start
                 out.append({"row": float(ys.mean()), "col": float(xs.mean()), "n_pixels": int(len(ys)),
                             "peak": float(img[ys, xs].max()),
                             "contrast_sigma": float(((img[ys, xs] - mu[ys, xs]) / sd[ys, xs]).max())})
+        return out
+
+
+class DbPointTargetDetector(ShipDetector):
+    """Bright point targets on the UNCLIPPED backscatter anomaly (dB above the local sea background).
+    Ships are typically +15..30 dB brighter than sea clutter; Sentinel-1 speckle rarely exceeds ~+6 dB, so a
+    +10 dB threshold on compact clusters separates them. Used when the ingest saved the anomaly map (real and
+    synthetic Sentinel-1 scenes); 8-bit uploads fall back to CFARShipDetector (8-bit clipping makes saturated
+    speckle and ships indistinguishable)."""
+    name = "Point-target detector on dB anomaly (untrained baseline)"
+
+    def __init__(self, anomaly_db: np.ndarray, threshold_db=10.0, min_px=2, max_px=400):
+        self.anom, self.thr, self.min_px, self.max_px = anomaly_db, threshold_db, min_px, max_px
+
+    def detect(self, gray: np.ndarray | None = None) -> list[dict]:
+        a = self.anom.astype(np.float32)
+        lab, _ = ndimage.label(a > self.thr, structure=np.ones((3, 3)))
+        out = []
+        for i, sl in enumerate(ndimage.find_objects(lab), start=1):
+            if sl is None:
+                continue
+            ys, xs = np.nonzero(lab[sl] == i)
+            if self.min_px <= len(ys) <= self.max_px:
+                ys, xs = ys + sl[0].start, xs + sl[1].start
+                v = a[ys, xs]
+                out.append({"row": float(ys.mean()), "col": float(xs.mean()), "n_pixels": int(len(ys)),
+                            "peak_db_above_sea": float(v.max()), "contrast_sigma": None})
         return out
 
 

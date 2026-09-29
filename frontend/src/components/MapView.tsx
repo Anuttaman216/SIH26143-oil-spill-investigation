@@ -27,7 +27,8 @@ const STYLE: any = {
                     attribution: "© OpenStreetMap contributors" } },
   layers: [
     { id: "bg", type: "background", paint: { "background-color": "#0a1826" } },
-    { id: "osm", type: "raster", source: "osm", paint: { "raster-opacity": 0.5, "raster-saturation": -0.7, "raster-brightness-max": 0.75 } },
+    { id: "osm", type: "raster", source: "osm", paint: { "raster-opacity": 0.9, "raster-saturation": -0.45, "raster-hue-rotate": 180, "raster-contrast": 0.25,
+      "raster-brightness-min": 0.72, "raster-brightness-max": 0.08 }   /* inverted OSM: dark basemap */ },
   ],
 };
 const LABEL_COLOR = ["match", ["get", "label"], "OIL_LIKELY", "#ff5a1f", "LOOKALIKE_LIKELY", "#4ade80", "#facc15"];
@@ -66,7 +67,7 @@ export default function MapView(props: {
   cb.current = props;
 
   useEffect(() => {
-    const m = new maplibregl.Map({ container: el.current!, style: STYLE, center: [11.3, 56.3], zoom: 6.3,
+    const m = new maplibregl.Map({ container: el.current!, style: STYLE, center: [76.5, 15.5], zoom: 4.6,
                                    attributionControl: { compact: true } });
     m.addControl(new maplibregl.NavigationControl({ visualizePitch: false }), "top-right");
     m.addControl(new maplibregl.ScaleControl({ unit: "metric" }), "bottom-right");
